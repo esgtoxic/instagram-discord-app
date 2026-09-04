@@ -1,0 +1,31 @@
+services:
+  - type: web
+    name: instagram-discord-app
+    runtime: python
+    plan: starter
+    region: singapore
+    autoDeploy: false
+    buildCommand: pip install -r requirements.txt
+    startCommand: python app.py
+    healthCheckPath: /health
+    disk:
+      name: instagram-discord-state
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: DISCORD_BOT_TOKEN
+        sync: false
+      - key: DISCORD_CLIENT_ID
+        sync: false
+      - key: INSTAGRAM_ACCESS_TOKEN
+        sync: false
+      - key: INSTAGRAM_USER_ID
+        sync: false
+      - key: INSTAGRAM_GRAPH_HOST
+        value: https://graph.instagram.com
+      - key: META_API_VERSION
+        value: v26.0
+      - key: POLL_INTERVAL_SECONDS
+        value: "30"
+      - key: STATE_DB
+        value: /var/data/state.sqlite3
