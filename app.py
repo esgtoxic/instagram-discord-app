@@ -313,7 +313,7 @@ async def status(interaction:discord.Interaction):
 @ig.command(name="test",description="Send a test message.")
 @app_commands.checks.has_permissions(manage_guild=True)
 async def test(interaction:discord.Interaction):
-    if not interaction.guild_id:
+    if not interaction.guild_id or not interaction.guild:
         return
 
     config=get_config(interaction.guild_id)
@@ -325,9 +325,6 @@ async def test(interaction:discord.Interaction):
 
     configured_channel_id=int(config["channel_id"])
 
-    # If the command is being run in the configured channel, use the exact
-    # interaction channel object Discord already supplied. This avoids any
-    # cache/transformer discrepancies.
     channel=None
     if interaction.channel is not None and getattr(interaction.channel,"id",None)==configured_channel_id and hasattr(interaction.channel,"send"):
         channel=interaction.channel
@@ -342,6 +339,27 @@ async def test(interaction:discord.Interaction):
         )
         return
 
+    # Inspect Discord's effective permissions for the bot in this exact channel.
+    me=interaction.guild.me
+    if me is None and bot.user is not None:
+        me=interaction.guild.get_member(bot.user.id)
+    if me is None and bot.user is not None:
+        try:
+            me=await interaction.guild.fetch_member(bot.user.id)
+        except discord.DiscordException:
+            me=None
+
+    perm_debug="Bot member could not be resolved."
+    if me is not None and hasattr(channel,"permissions_for"):
+        p=channel.permissions_for(me)
+        perm_debug=(
+            f"View Channel: **{p.view_channel}**\n"
+            f"Send Messages: **{p.send_messages}**\n"
+            f"Embed Links: **{p.embed_links}**\n"
+            f"Read Message History: **{p.read_message_history}**\n"
+            f"Send Messages in Threads: **{getattr(p,'send_messages_in_threads',False)}**"
+        )
+
     e=discord.Embed(
         title="✅ Instagram Bot Test",
         description="The hosted Discord app is online and can post in this channel."
@@ -352,20 +370,25 @@ async def test(interaction:discord.Interaction):
         await channel.send(embed=e)
     except discord.Forbidden:
         await interaction.followup.send(
-            "I found the configured channel, but Discord denied permission to send there. "
-            "Give the bot **View Channel**, **Send Messages**, and **Embed Links**.",
+            "Discord denied the send attempt. These are the bot's **effective permissions** "
+            "in the configured channel:\n\n"
+            + perm_debug
+            + "\n\nIf any required value is **False**, that permission is being denied "
+              "by either the channel, its category, or the bot's server role.",
             ephemeral=True
         )
         return
     except discord.DiscordException as exc:
         await interaction.followup.send(
-            f"Discord send failed: `{type(exc).__name__}: {str(exc)[:500]}`",
+            f"Discord send failed: `{type(exc).__name__}: {str(exc)[:500]}`\n\n"
+            + perm_debug,
             ephemeral=True
         )
         return
 
     await interaction.followup.send(
-        f"✅ Test message sent to <#{configured_channel_id}>.",
+        f"✅ Test message sent to <#{configured_channel_id}>.\n\n"
+        + perm_debug,
         ephemeral=True
     )
 
