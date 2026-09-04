@@ -193,10 +193,16 @@ async def before_poll(): await bot.wait_until_ready()
 @app_commands.describe(channel="Discord channel for Instagram updates",include_stories="Also forward Instagram Stories")
 @app_commands.checks.has_permissions(manage_guild=True)
 async def setup(interaction:discord.Interaction,channel:discord.TextChannel,include_stories:bool=True):
-    if not interaction.guild_id:
-        await interaction.response.send_message("Use this command inside a Discord server.",ephemeral=True); return
-    # Resolve the bot's own guild member safely. In some guild/cache situations
-    # guild.me can briefly be None even though the bot is online.
+    # Acknowledge the interaction immediately. Discord expects an initial
+    # response within a few seconds; all slower work happens after this defer.
+    if not interaction.guild_id or not interaction.guild:
+        await interaction.response.send_message("Use this command inside a Discord server.",ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+    log.info("Running /instagram setup for guild=%s channel=%s",interaction.guild_id,channel.id)
+
+    # Resolve the bot member after acknowledging the interaction.
     me=interaction.guild.me
     if me is None and bot.user is not None:
         me=interaction.guild.get_member(bot.user.id)
@@ -213,27 +219,40 @@ async def setup(interaction:discord.Interaction,channel:discord.TextChannel,incl
         if not perms.send_messages: missing.append("Send Messages")
         if not perms.embed_links: missing.append("Embed Links")
         if missing:
-            await interaction.response.send_message("Give the bot these permissions first: "+", ".join(missing),ephemeral=True); return
-
-    await interaction.response.defer(ephemeral=True)
-    log.info("Running /instagram setup for guild=%s channel=%s",interaction.guild_id,channel.id)
+            await interaction.followup.send(
+                "Give the bot these permissions first: "+", ".join(missing),
+                ephemeral=True
+            )
+            return
 
     try:
         username=await asyncio.to_thread(fetch_username)
     except Exception as exc:
         log.error("Instagram connection failed during setup: %r",exc)
-        await interaction.followup.send(f"Instagram connection failed: `{type(exc).__name__}: {str(exc)[:540]}`",ephemeral=True); return
+        await interaction.followup.send(
+            f"Instagram connection failed: `{type(exc).__name__}: {str(exc)[:540]}`",
+            ephemeral=True
+        )
+        return
 
     try:
         save_config(interaction.guild_id,channel.id,include_stories)
     except Exception as exc:
         log.error("Database/config save failed during setup: %r",exc)
-        await interaction.followup.send(f"Could not save the Discord channel configuration: `{type(exc).__name__}: {str(exc)[:500]}`",ephemeral=True); return
+        await interaction.followup.send(
+            f"Could not save the Discord channel configuration: `{type(exc).__name__}: {str(exc)[:500]}`",
+            ephemeral=True
+        )
+        return
 
     await seed_current(interaction.guild_id,include_stories)
+
     await interaction.followup.send(
-      f"✅ Connected **@{username or 'Instagram'}** to {channel.mention}.\nStories: **{'On' if include_stories else 'Off'}**\nNew content is checked about every {POLL_INTERVAL_SECONDS} seconds.",
-      ephemeral=True)
+      f"✅ Connected **@{username or 'Instagram'}** to {channel.mention}.\n"
+      f"Stories: **{'On' if include_stories else 'Off'}**\n"
+      f"New content is checked about every {POLL_INTERVAL_SECONDS} seconds.",
+      ephemeral=True
+    )
 
 @ig.command(name="status",description="Show the current Instagram setup.")
 @app_commands.checks.has_permissions(manage_guild=True)
