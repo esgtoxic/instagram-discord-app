@@ -189,20 +189,37 @@ async def poll_instagram():
 @poll_instagram.before_loop
 async def before_poll(): await bot.wait_until_ready()
 
-@ig.command(name="setup",description="Choose where Instagram posts appear.")
-@app_commands.describe(channel="Discord channel for Instagram updates",include_stories="Also forward Instagram Stories")
+@ig.command(name="setup",description="Use this channel for Instagram auto-posts.")
+@app_commands.describe(include_stories="Also forward Instagram Stories")
 @app_commands.checks.has_permissions(manage_guild=True)
-async def setup(interaction:discord.Interaction,channel:discord.TextChannel,include_stories:bool=True):
-    # Acknowledge the interaction immediately. Discord expects an initial
-    # response within a few seconds; all slower work happens after this defer.
+async def setup(interaction:discord.Interaction,include_stories:bool=True):
+    # Acknowledge immediately so Discord never times out the interaction.
     if not interaction.guild_id or not interaction.guild:
-        await interaction.response.send_message("Use this command inside a Discord server.",ephemeral=True)
+        await interaction.response.send_message(
+            "Use this command inside a Discord server.",
+            ephemeral=True
+        )
         return
 
     await interaction.response.defer(ephemeral=True)
-    log.info("Running /instagram setup for guild=%s channel=%s",interaction.guild_id,channel.id)
 
-    # Resolve the bot member after acknowledging the interaction.
+    # Use the channel where the command was executed. This avoids Discord.py
+    # TextChannel transformer failures and makes setup simpler for admins.
+    channel=interaction.channel
+
+    if not isinstance(channel,discord.TextChannel):
+        await interaction.followup.send(
+            "Please run `/instagram setup` inside a normal server text channel.",
+            ephemeral=True
+        )
+        return
+
+    log.info(
+        "Running /instagram setup for guild=%s channel=%s",
+        interaction.guild_id,
+        channel.id
+    )
+
     me=interaction.guild.me
     if me is None and bot.user is not None:
         me=interaction.guild.get_member(bot.user.id)
@@ -218,9 +235,11 @@ async def setup(interaction:discord.Interaction,channel:discord.TextChannel,incl
         if not perms.view_channel: missing.append("View Channel")
         if not perms.send_messages: missing.append("Send Messages")
         if not perms.embed_links: missing.append("Embed Links")
+
         if missing:
             await interaction.followup.send(
-                "Give the bot these permissions first: "+", ".join(missing),
+                "Give the bot these permissions in this channel first: "
+                + ", ".join(missing),
                 ephemeral=True
             )
             return
@@ -240,7 +259,8 @@ async def setup(interaction:discord.Interaction,channel:discord.TextChannel,incl
     except Exception as exc:
         log.error("Database/config save failed during setup: %r",exc)
         await interaction.followup.send(
-            f"Could not save the Discord channel configuration: `{type(exc).__name__}: {str(exc)[:500]}`",
+            f"Could not save the Discord channel configuration: "
+            f"`{type(exc).__name__}: {str(exc)[:500]}`",
             ephemeral=True
         )
         return
@@ -248,10 +268,11 @@ async def setup(interaction:discord.Interaction,channel:discord.TextChannel,incl
     await seed_current(interaction.guild_id,include_stories)
 
     await interaction.followup.send(
-      f"✅ Connected **@{username or 'Instagram'}** to {channel.mention}.\n"
-      f"Stories: **{'On' if include_stories else 'Off'}**\n"
-      f"New content is checked about every {POLL_INTERVAL_SECONDS} seconds.",
-      ephemeral=True
+        f"✅ Connected **@{username or 'Instagram'}** to {channel.mention}.\n"
+        f"Stories: **{'On' if include_stories else 'Off'}**\n"
+        f"New content is checked about every {POLL_INTERVAL_SECONDS} seconds.\n\n"
+        f"Run `/instagram test` here to verify posting.",
+        ephemeral=True
     )
 
 @ig.command(name="status",description="Show the current Instagram setup.")
