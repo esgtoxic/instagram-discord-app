@@ -136,15 +136,36 @@ async def make_embed(item,kind):
     return e
 
 async def resolve_channel(guild_id,channel_id):
-    guild=bot.get_guild(guild_id)
-    if not guild: return None
-    ch=guild.get_channel(channel_id)
-    if isinstance(ch,discord.TextChannel): return ch
+    # Resolve by channel ID first. Relying on bot.get_guild(...).get_channel(...)
+    # can fail when Discord's local cache is incomplete after a reconnect/redeploy.
+    ch=bot.get_channel(channel_id)
+    if isinstance(ch,(discord.TextChannel,discord.Thread)):
+        return ch
+
     try:
         ch=await bot.fetch_channel(channel_id)
-        return ch if isinstance(ch,discord.TextChannel) else None
-    except discord.DiscordException:
-        return None
+        if isinstance(ch,(discord.TextChannel,discord.Thread)):
+            return ch
+    except discord.Forbidden:
+        log.error(
+            "Bot cannot access configured channel %s in guild %s",
+            channel_id,
+            guild_id
+        )
+    except discord.NotFound:
+        log.error(
+            "Configured channel %s no longer exists in guild %s",
+            channel_id,
+            guild_id
+        )
+    except discord.DiscordException as exc:
+        log.error(
+            "Failed to fetch configured channel %s: %r",
+            channel_id,
+            exc
+        )
+
+    return None
 
 async def seed_current(guild_id,include_stories):
     try:
