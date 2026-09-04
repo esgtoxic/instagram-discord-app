@@ -256,6 +256,7 @@ async def setup(interaction:discord.Interaction,include_stories:bool=True):
         missing=[]
         if not perms.view_channel: missing.append("View Channel")
         if not perms.send_messages: missing.append("Send Messages")
+        if not perms.read_message_history: missing.append("Read Message History")
         if not perms.embed_links: missing.append("Embed Links")
 
         if missing:
@@ -478,7 +479,8 @@ PAGE="""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" c
 
 def install_url():
     if not DISCORD_CLIENT_ID: return None
-    permissions=1024+2048+16384
+    # View Channel + Send Messages + Embed Links + Read Message History
+    permissions=1024+2048+16384+65536
     return "https://discord.com/oauth2/authorize?"+urlencode({"client_id":DISCORD_CLIENT_ID,"scope":"bot applications.commands","permissions":permissions})
 
 @web.get("/")
