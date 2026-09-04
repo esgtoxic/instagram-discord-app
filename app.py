@@ -195,19 +195,41 @@ async def before_poll(): await bot.wait_until_ready()
 async def setup(interaction:discord.Interaction,channel:discord.TextChannel,include_stories:bool=True):
     if not interaction.guild_id:
         await interaction.response.send_message("Use this command inside a Discord server.",ephemeral=True); return
+    # Resolve the bot's own guild member safely. In some guild/cache situations
+    # guild.me can briefly be None even though the bot is online.
     me=interaction.guild.me
-    perms=channel.permissions_for(me)
-    missing=[]
-    if not perms.view_channel: missing.append("View Channel")
-    if not perms.send_messages: missing.append("Send Messages")
-    if not perms.embed_links: missing.append("Embed Links")
-    if missing:
-        await interaction.response.send_message("Give the bot these permissions first: "+", ".join(missing),ephemeral=True); return
+    if me is None and bot.user is not None:
+        me=interaction.guild.get_member(bot.user.id)
+    if me is None and bot.user is not None:
+        try:
+            me=await interaction.guild.fetch_member(bot.user.id)
+        except discord.DiscordException:
+            me=None
+
+    if me is not None:
+        perms=channel.permissions_for(me)
+        missing=[]
+        if not perms.view_channel: missing.append("View Channel")
+        if not perms.send_messages: missing.append("Send Messages")
+        if not perms.embed_links: missing.append("Embed Links")
+        if missing:
+            await interaction.response.send_message("Give the bot these permissions first: "+", ".join(missing),ephemeral=True); return
+
     await interaction.response.defer(ephemeral=True)
-    try: username=await asyncio.to_thread(fetch_username)
+    log.info("Running /instagram setup for guild=%s channel=%s",interaction.guild_id,channel.id)
+
+    try:
+        username=await asyncio.to_thread(fetch_username)
     except Exception as exc:
-        await interaction.followup.send(f"Instagram connection failed: `{str(exc)[:600]}`",ephemeral=True); return
-    save_config(interaction.guild_id,channel.id,include_stories)
+        log.error("Instagram connection failed during setup: %r",exc)
+        await interaction.followup.send(f"Instagram connection failed: `{type(exc).__name__}: {str(exc)[:540]}`",ephemeral=True); return
+
+    try:
+        save_config(interaction.guild_id,channel.id,include_stories)
+    except Exception as exc:
+        log.error("Database/config save failed during setup: %r",exc)
+        await interaction.followup.send(f"Could not save the Discord channel configuration: `{type(exc).__name__}: {str(exc)[:500]}`",ephemeral=True); return
+
     await seed_current(interaction.guild_id,include_stories)
     await interaction.followup.send(
       f"✅ Connected **@{username or 'Instagram'}** to {channel.mention}.\nStories: **{'On' if include_stories else 'Off'}**\nNew content is checked about every {POLL_INTERVAL_SECONDS} seconds.",
@@ -266,7 +288,15 @@ async def disconnect(interaction:discord.Interaction):
     await interaction.response.send_message("✅ Instagram auto-posting disconnected.",ephemeral=True)
 
 async def cmd_error(interaction,error):
-    msg="You need **Manage Server** permission to use this command." if isinstance(error,app_commands.MissingPermissions) else "Something went wrong."
+    if isinstance(error,app_commands.MissingPermissions):
+        msg="You need **Manage Server** permission to use this command."
+    else:
+        original=getattr(error,"original",error)
+        detail=f"{type(original).__name__}: {str(original)}"
+        log.error("Slash command failed: %s",detail,exc_info=original if isinstance(original,BaseException) else None)
+        # Return the underlying error ephemerally to the administrator so setup
+        # problems can be diagnosed without exposing it publicly in the channel.
+        msg=f"Something went wrong: `{detail[:650]}`"
     if interaction.response.is_done(): await interaction.followup.send(msg,ephemeral=True)
     else: await interaction.response.send_message(msg,ephemeral=True)
 
