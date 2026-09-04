@@ -339,7 +339,6 @@ async def test(interaction:discord.Interaction):
         )
         return
 
-    # Inspect Discord's effective permissions for the bot in this exact channel.
     me=interaction.guild.me
     if me is None and bot.user is not None:
         me=interaction.guild.get_member(bot.user.id)
@@ -360,38 +359,68 @@ async def test(interaction:discord.Interaction):
             f"Send Messages in Threads: **{getattr(p,'send_messages_in_threads',False)}**"
         )
 
-    e=discord.Embed(
-        title="✅ Instagram Bot Test",
-        description="The hosted Discord app is online and can post in this channel."
-    )
-    e.set_footer(text="Instagram → Discord")
-
+    # First test a plain text message. If this fails, the problem is a
+    # channel/server-level Discord restriction rather than embed formatting.
     try:
-        await channel.send(embed=e)
-    except discord.Forbidden:
+        plain=await channel.send("✅ Instagram bot plain-text permission test.")
+    except discord.Forbidden as exc:
+        status=getattr(exc,"status","unknown")
+        code=getattr(exc,"code","unknown")
+        detail=getattr(exc,"text",None) or str(exc)
         await interaction.followup.send(
-            "Discord denied the send attempt. These are the bot's **effective permissions** "
-            "in the configured channel:\n\n"
+            "Discord rejected even a **plain text** message.\n\n"
+            f"HTTP status: `{status}`\n"
+            f"Discord error code: `{code}`\n"
+            f"Error: `{str(detail)[:450]}`\n\n"
             + perm_debug
-            + "\n\nIf any required value is **False**, that permission is being denied "
-              "by either the channel, its category, or the bot's server role.",
+            + "\n\nThis means the restriction is outside the embed itself.",
             ephemeral=True
         )
         return
     except discord.DiscordException as exc:
         await interaction.followup.send(
-            f"Discord send failed: `{type(exc).__name__}: {str(exc)[:500]}`\n\n"
+            f"Plain-text send failed: `{type(exc).__name__}: {str(exc)[:500]}`\n\n"
+            + perm_debug,
+            ephemeral=True
+        )
+        return
+
+    # Plain text worked. Test an embed separately.
+    e=discord.Embed(
+        title="✅ Instagram Bot Test",
+        description="The hosted Discord app can send embeds in this channel."
+    )
+    e.set_footer(text="Instagram → Discord")
+
+    try:
+        await channel.send(embed=e)
+    except discord.Forbidden as exc:
+        status=getattr(exc,"status","unknown")
+        code=getattr(exc,"code","unknown")
+        detail=getattr(exc,"text",None) or str(exc)
+        await interaction.followup.send(
+            "✅ Plain text worked, but Discord rejected the **embed**.\n\n"
+            f"HTTP status: `{status}`\n"
+            f"Discord error code: `{code}`\n"
+            f"Error: `{str(detail)[:450]}`\n\n"
+            + perm_debug,
+            ephemeral=True
+        )
+        return
+    except discord.DiscordException as exc:
+        await interaction.followup.send(
+            f"✅ Plain text worked, but embed send failed: "
+            f"`{type(exc).__name__}: {str(exc)[:500]}`\n\n"
             + perm_debug,
             ephemeral=True
         )
         return
 
     await interaction.followup.send(
-        f"✅ Test message sent to <#{configured_channel_id}>.\n\n"
+        f"✅ Both plain text and embed messages were sent to <#{configured_channel_id}>.\n\n"
         + perm_debug,
         ephemeral=True
     )
-
 @ig.command(name="latest",description="Post the latest Instagram feed item.")
 @app_commands.checks.has_permissions(manage_guild=True)
 async def latest(interaction:discord.Interaction):
