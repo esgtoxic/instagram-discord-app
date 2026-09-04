@@ -136,34 +136,35 @@ async def make_embed(item,kind):
     return e
 
 async def resolve_channel(guild_id,channel_id):
-    # Resolve by channel ID first. Relying on bot.get_guild(...).get_channel(...)
-    # can fail when Discord's local cache is incomplete after a reconnect/redeploy.
+    # Prefer cache, then guild-level REST, then global REST. Do not restrict
+    # to TextChannel only: Discord can return other message-capable channel
+    # implementations depending on channel/server configuration.
     ch=bot.get_channel(channel_id)
-    if isinstance(ch,(discord.TextChannel,discord.Thread)):
+    if ch is not None and hasattr(ch,"send"):
         return ch
+
+    guild=bot.get_guild(guild_id)
+    if guild is not None:
+        ch=guild.get_channel(channel_id)
+        if ch is not None and hasattr(ch,"send"):
+            return ch
+        try:
+            ch=await guild.fetch_channel(channel_id)
+            if ch is not None and hasattr(ch,"send"):
+                return ch
+        except discord.DiscordException as exc:
+            log.warning("Guild channel fetch failed for %s: %r",channel_id,exc)
 
     try:
         ch=await bot.fetch_channel(channel_id)
-        if isinstance(ch,(discord.TextChannel,discord.Thread)):
+        if ch is not None and hasattr(ch,"send"):
             return ch
     except discord.Forbidden:
-        log.error(
-            "Bot cannot access configured channel %s in guild %s",
-            channel_id,
-            guild_id
-        )
+        log.error("Bot cannot access configured channel %s in guild %s",channel_id,guild_id)
     except discord.NotFound:
-        log.error(
-            "Configured channel %s no longer exists in guild %s",
-            channel_id,
-            guild_id
-        )
+        log.error("Configured channel %s no longer exists in guild %s",channel_id,guild_id)
     except discord.DiscordException as exc:
-        log.error(
-            "Failed to fetch configured channel %s: %r",
-            channel_id,
-            exc
-        )
+        log.error("Global channel fetch failed for %s: %r",channel_id,exc)
 
     return None
 
@@ -312,16 +313,61 @@ async def status(interaction:discord.Interaction):
 @ig.command(name="test",description="Send a test message.")
 @app_commands.checks.has_permissions(manage_guild=True)
 async def test(interaction:discord.Interaction):
-    if not interaction.guild_id: return
+    if not interaction.guild_id:
+        return
+
     config=get_config(interaction.guild_id)
     if not config:
-        await interaction.response.send_message("Run `/instagram setup` first.",ephemeral=True); return
-    channel=await resolve_channel(interaction.guild_id,int(config["channel_id"]))
+        await interaction.response.send_message("Run `/instagram setup` first.",ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    configured_channel_id=int(config["channel_id"])
+
+    # If the command is being run in the configured channel, use the exact
+    # interaction channel object Discord already supplied. This avoids any
+    # cache/transformer discrepancies.
+    channel=None
+    if interaction.channel is not None and getattr(interaction.channel,"id",None)==configured_channel_id and hasattr(interaction.channel,"send"):
+        channel=interaction.channel
+    else:
+        channel=await resolve_channel(interaction.guild_id,configured_channel_id)
+
     if not channel:
-        await interaction.response.send_message("Configured channel is unavailable.",ephemeral=True); return
-    e=discord.Embed(title="✅ Instagram Bot Test",description="The hosted Discord app is online and can post here.")
-    await channel.send(embed=e)
-    await interaction.response.send_message(f"Test sent to {channel.mention}.",ephemeral=True)
+        await interaction.followup.send(
+            f"Configured channel <#{configured_channel_id}> could not be resolved. "
+            "Run `/instagram setup` again in the channel you want to use.",
+            ephemeral=True
+        )
+        return
+
+    e=discord.Embed(
+        title="✅ Instagram Bot Test",
+        description="The hosted Discord app is online and can post in this channel."
+    )
+    e.set_footer(text="Instagram → Discord")
+
+    try:
+        await channel.send(embed=e)
+    except discord.Forbidden:
+        await interaction.followup.send(
+            "I found the configured channel, but Discord denied permission to send there. "
+            "Give the bot **View Channel**, **Send Messages**, and **Embed Links**.",
+            ephemeral=True
+        )
+        return
+    except discord.DiscordException as exc:
+        await interaction.followup.send(
+            f"Discord send failed: `{type(exc).__name__}: {str(exc)[:500]}`",
+            ephemeral=True
+        )
+        return
+
+    await interaction.followup.send(
+        f"✅ Test message sent to <#{configured_channel_id}>.",
+        ephemeral=True
+    )
 
 @ig.command(name="latest",description="Post the latest Instagram feed item.")
 @app_commands.checks.has_permissions(manage_guild=True)
