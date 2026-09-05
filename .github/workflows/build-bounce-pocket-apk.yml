@@ -3,6 +3,8 @@ name: Build Bounce Pocket APK
 on:
   push:
     branches: [ "bounce-pocket-build" ]
+  pull_request:
+    branches: [ "main" ]
   workflow_dispatch:
 
 jobs:
