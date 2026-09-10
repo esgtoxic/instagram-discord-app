@@ -19,7 +19,9 @@ DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN", "").strip()
 DISCORD_CLIENT_ID = os.getenv("DISCORD_CLIENT_ID", "").strip()
 INSTAGRAM_ACCESS_TOKEN = os.getenv("INSTAGRAM_ACCESS_TOKEN", "").strip()
 INSTAGRAM_USER_ID = os.getenv("INSTAGRAM_USER_ID", "").strip()
-INSTAGRAM_GRAPH_HOST = os.getenv("INSTAGRAM_GRAPH_HOST", "https://graph.instagram.com").rstrip("/")
+INSTAGRAM_GRAPH_HOST = os.getenv(
+    "INSTAGRAM_GRAPH_HOST", "https://graph.instagram.com"
+).rstrip("/")
 META_API_VERSION = os.getenv("META_API_VERSION", "v26.0").strip()
 POLL_INTERVAL_SECONDS = max(15, int(os.getenv("POLL_INTERVAL_SECONDS", "30")))
 PORT = int(os.getenv("PORT", "10000"))
@@ -31,6 +33,10 @@ logging.basicConfig(
 )
 log = logging.getLogger("instagram-discord-app")
 
+
+# ---------------------------------------------------------------------------
+# Persistent state
+# ---------------------------------------------------------------------------
 
 def db():
     parent = os.path.dirname(STATE_DB)
@@ -132,9 +138,14 @@ def mark_posted(guild_id, media_id, kind):
         conn.commit()
 
 
+# ---------------------------------------------------------------------------
+# Instagram API
+# ---------------------------------------------------------------------------
+
 MEDIA_FIELDS = (
     "id,caption,media_type,media_product_type,media_url,thumbnail_url,"
-    "permalink,timestamp,username,children{media_type,media_url,thumbnail_url}"
+    "permalink,timestamp,username,"
+    "children{media_type,media_url,thumbnail_url}"
 )
 STORY_FIELDS = (
     "id,caption,media_type,media_product_type,media_url,thumbnail_url,"
@@ -151,6 +162,7 @@ def graph_get(path, fields, limit=100):
             "fields": fields,
             "limit": limit,
         },
+        headers={"Cache-Control": "no-cache"},
         timeout=25,
     )
     if not response.ok:
@@ -161,12 +173,11 @@ def graph_get(path, fields, limit=100):
 
 
 def fetch_feed():
-    # /media includes feed posts, videos, carousels and Reels.
+    # Instagram /media includes posts, videos, carousels and Reels.
     return graph_get(f"{INSTAGRAM_USER_ID}/media", MEDIA_FIELDS, limit=100)
 
 
 def fetch_stories():
-    # Fetch every currently active Story available to the Professional account.
     return graph_get(f"{INSTAGRAM_USER_ID}/stories", STORY_FIELDS, limit=100)
 
 
@@ -178,6 +189,7 @@ def fetch_username():
             "access_token": INSTAGRAM_ACCESS_TOKEN,
             "fields": "username",
         },
+        headers={"Cache-Control": "no-cache"},
         timeout=25,
     )
     if not response.ok:
@@ -201,6 +213,35 @@ def oldest_first(items):
     return sorted(
         items,
         key=lambda item: parse_ts(item.get("timestamp")) or fallback,
+    )
+
+
+def newest_item(items):
+    if not items:
+        return None
+
+    timestamped = [
+        (parse_ts(item.get("timestamp")), item)
+        for item in items
+    ]
+    valid = [(ts, item) for ts, item in timestamped if ts is not None]
+
+    if valid:
+        return max(valid, key=lambda pair: pair[0])[1]
+
+    # The Instagram /media endpoint normally returns newest first. If an
+    # unusual timestamp cannot be parsed, prefer the API's first result.
+    return items[0]
+
+
+def is_reel(item):
+    product_type = (item.get("media_product_type") or "").upper()
+    permalink = (item.get("permalink") or "").lower()
+
+    return (
+        product_type in {"REELS", "REEL"}
+        or "/reel/" in permalink
+        or "/reels/" in permalink
     )
 
 
@@ -230,11 +271,10 @@ def title_for(item, kind):
     if kind == "story":
         return "📸 New Instagram Story"
 
-    product_type = (item.get("media_product_type") or "").upper()
-    media_type = (item.get("media_type") or "").upper()
-
-    if product_type == "REELS":
+    if is_reel(item):
         return "🎬 New Instagram Reel"
+
+    media_type = (item.get("media_type") or "").upper()
     if media_type == "CAROUSEL_ALBUM":
         return "🖼️ New Instagram Carousel"
     if media_type == "VIDEO":
@@ -256,9 +296,14 @@ def instagram_link(item, kind):
     return "https://www.instagram.com/"
 
 
+# ---------------------------------------------------------------------------
+# Discord bot
+# ---------------------------------------------------------------------------
+
 intents = discord.Intents.none()
 intents.guilds = True
 bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
+
 ig = app_commands.Group(
     name="instagram",
     description="Instagram auto-posting settings",
@@ -307,6 +352,7 @@ async def resolve_channel(guild_id, channel_id):
         channel = guild.get_channel(channel_id)
         if channel is not None and hasattr(channel, "send"):
             return channel
+
         try:
             channel = await guild.fetch_channel(channel_id)
             if channel is not None and hasattr(channel, "send"):
@@ -319,9 +365,17 @@ async def resolve_channel(guild_id, channel_id):
         if channel is not None and hasattr(channel, "send"):
             return channel
     except discord.Forbidden:
-        log.error("Bot cannot access configured channel %s in guild %s", channel_id, guild_id)
+        log.error(
+            "Bot cannot access configured channel %s in guild %s",
+            channel_id,
+            guild_id,
+        )
     except discord.NotFound:
-        log.error("Configured channel %s no longer exists in guild %s", channel_id, guild_id)
+        log.error(
+            "Configured channel %s no longer exists in guild %s",
+            channel_id,
+            guild_id,
+        )
     except discord.DiscordException as exc:
         log.error("Global channel fetch failed for %s: %r", channel_id, exc)
 
@@ -330,14 +384,12 @@ async def resolve_channel(guild_id, channel_id):
 
 async def seed_current(guild_id, include_stories):
     try:
-        feed = await asyncio.to_thread(fetch_feed)
-        for item in feed:
+        for item in await asyncio.to_thread(fetch_feed):
             if item.get("id"):
                 mark_posted(guild_id, str(item["id"]), "feed")
 
         if include_stories:
-            stories = await asyncio.to_thread(fetch_stories)
-            for item in stories:
+            for item in await asyncio.to_thread(fetch_stories):
                 if item.get("id"):
                     mark_posted(guild_id, str(item["id"]), "story")
     except Exception:
@@ -349,20 +401,51 @@ async def forward(config, item, kind):
     media_id = str(item.get("id") or "")
 
     if not media_id or posted(guild_id, media_id):
-        return
+        return False
 
     channel = await resolve_channel(guild_id, int(config["channel_id"]))
     if not channel:
-        log.warning("Skipping Instagram item %s because channel is unavailable", media_id)
-        return
+        log.warning(
+            "Skipping Instagram item %s because channel is unavailable",
+            media_id,
+        )
+        return False
 
     try:
         await channel.send(embed=await make_embed(item, kind))
         mark_posted(guild_id, media_id, kind)
-        log.info("Forwarded Instagram %s %s to guild %s", kind, media_id, guild_id)
+        log.info(
+            "Forwarded Instagram %s %s to guild %s",
+            kind,
+            media_id,
+            guild_id,
+        )
+        return True
     except discord.DiscordException:
-        # Keep it unseen so the next poll can retry.
-        log.exception("Discord send failed for Instagram %s %s", kind, media_id)
+        # Leave unseen so the next poll can retry.
+        log.exception(
+            "Discord send failed for Instagram %s %s",
+            kind,
+            media_id,
+        )
+        return False
+
+
+async def sync_unseen(config):
+    sent = 0
+
+    feed = oldest_first(await asyncio.to_thread(fetch_feed))
+    for item in feed:
+        if await forward(config, item, "feed"):
+            sent += 1
+
+    if bool(config["include_stories"]):
+        stories = oldest_first(await asyncio.to_thread(fetch_stories))
+        for item in stories:
+            if await forward(config, item, "story"):
+                sent += 1
+
+    return sent
 
 
 @tasks.loop(seconds=POLL_INTERVAL_SECONDS)
@@ -372,7 +455,6 @@ async def poll_instagram():
         return
 
     try:
-        # Every unseen post, Reel, video and carousel is processed.
         feed = oldest_first(await asyncio.to_thread(fetch_feed))
     except Exception:
         log.exception("Instagram feed fetch failed")
@@ -381,7 +463,6 @@ async def poll_instagram():
     stories = []
     if any(bool(config["include_stories"]) for config in configs):
         try:
-            # Every unseen active Story is processed individually.
             stories = oldest_first(await asyncio.to_thread(fetch_stories))
         except Exception:
             log.exception("Instagram Stories fetch failed")
@@ -400,13 +481,20 @@ async def before_poll():
     await bot.wait_until_ready()
 
 
+# ---------------------------------------------------------------------------
+# Slash commands
+# ---------------------------------------------------------------------------
+
 @ig.command(
     name="setup",
     description="Use this channel for all new Instagram posts, Reels and Stories.",
 )
 @app_commands.describe(include_stories="Also forward all new Instagram Stories")
 @app_commands.checks.has_permissions(manage_guild=True)
-async def setup(interaction: discord.Interaction, include_stories: bool = True):
+async def setup(
+    interaction: discord.Interaction,
+    include_stories: bool = True,
+):
     if not interaction.guild_id or not interaction.guild:
         await interaction.response.send_message(
             "Use this command inside a Discord server.",
@@ -436,6 +524,7 @@ async def setup(interaction: discord.Interaction, include_stories: bool = True):
     if me is not None:
         permissions = channel.permissions_for(me)
         missing = []
+
         if not permissions.view_channel:
             missing.append("View Channel")
         if not permissions.send_messages:
@@ -447,7 +536,8 @@ async def setup(interaction: discord.Interaction, include_stories: bool = True):
 
         if missing:
             await interaction.followup.send(
-                "Give the bot these permissions in this channel first: " + ", ".join(missing),
+                "Give the bot these permissions in this channel first: "
+                + ", ".join(missing),
                 ephemeral=True,
             )
             return
@@ -456,16 +546,22 @@ async def setup(interaction: discord.Interaction, include_stories: bool = True):
         username = await asyncio.to_thread(fetch_username)
     except Exception as exc:
         await interaction.followup.send(
-            f"Instagram connection failed: `{type(exc).__name__}: {str(exc)[:540]}`",
+            f"Instagram connection failed: "
+            f"`{type(exc).__name__}: {str(exc)[:540]}`",
             ephemeral=True,
         )
         return
 
     try:
-        save_config(interaction.guild_id, channel.id, include_stories)
+        save_config(
+            interaction.guild_id,
+            channel.id,
+            include_stories,
+        )
     except Exception as exc:
         await interaction.followup.send(
-            f"Could not save configuration: `{type(exc).__name__}: {str(exc)[:500]}`",
+            f"Could not save configuration: "
+            f"`{type(exc).__name__}: {str(exc)[:500]}`",
             ephemeral=True,
         )
         return
@@ -497,7 +593,11 @@ async def status(interaction: discord.Interaction):
         return
 
     channel = interaction.guild.get_channel(int(config["channel_id"]))
-    channel_text = channel.mention if channel else f"<#{int(config['channel_id'])}>"
+    channel_text = (
+        channel.mention
+        if channel
+        else f"<#{int(config['channel_id'])}>"
+    )
 
     await interaction.response.send_message(
         "✅ Instagram auto-posting is active.\n"
@@ -524,16 +624,25 @@ async def test(interaction: discord.Interaction):
         return
 
     await interaction.response.defer(ephemeral=True)
-    channel = await resolve_channel(interaction.guild_id, int(config["channel_id"]))
+    channel = await resolve_channel(
+        interaction.guild_id,
+        int(config["channel_id"]),
+    )
 
     if not channel:
-        await interaction.followup.send("Configured channel is unavailable.", ephemeral=True)
+        await interaction.followup.send(
+            "Configured channel is unavailable.",
+            ephemeral=True,
+        )
         return
 
     embed = discord.Embed(
         title="✅ Instagram Bot Test",
         url="https://www.instagram.com/",
-        description="The bot can post here successfully.\n\n🔗 **[Open Instagram](https://www.instagram.com/)**",
+        description=(
+            "The bot can post here successfully.\n\n"
+            "🔗 **[Open Instagram](https://www.instagram.com/)**"
+        ),
     )
     embed.set_footer(text="Instagram → Discord")
 
@@ -541,7 +650,8 @@ async def test(interaction: discord.Interaction):
         await channel.send(embed=embed)
     except discord.DiscordException as exc:
         await interaction.followup.send(
-            f"Discord send failed: `{type(exc).__name__}: {str(exc)[:500]}`",
+            f"Discord send failed: "
+            f"`{type(exc).__name__}: {str(exc)[:500]}`",
             ephemeral=True,
         )
         return
@@ -560,13 +670,17 @@ async def latest(interaction: discord.Interaction):
 
     config = get_config(interaction.guild_id)
     if not config:
-        await interaction.response.send_message("Run `/instagram setup` first.", ephemeral=True)
+        await interaction.response.send_message(
+            "Run `/instagram setup` first.",
+            ephemeral=True,
+        )
         return
 
     await interaction.response.defer(ephemeral=True)
 
     try:
-        feed = oldest_first(await asyncio.to_thread(fetch_feed))
+        feed = await asyncio.to_thread(fetch_feed)
+        item = newest_item(feed)
     except Exception as exc:
         await interaction.followup.send(
             f"Instagram request failed: `{str(exc)[:600]}`",
@@ -574,20 +688,123 @@ async def latest(interaction: discord.Interaction):
         )
         return
 
-    if not feed:
-        await interaction.followup.send("Instagram returned no feed items.", ephemeral=True)
+    if not item:
+        await interaction.followup.send(
+            "Instagram returned no feed items.",
+            ephemeral=True,
+        )
         return
 
-    channel = await resolve_channel(interaction.guild_id, int(config["channel_id"]))
+    channel = await resolve_channel(
+        interaction.guild_id,
+        int(config["channel_id"]),
+    )
     if not channel:
-        await interaction.followup.send("Configured channel is unavailable.", ephemeral=True)
+        await interaction.followup.send(
+            "Configured channel is unavailable.",
+            ephemeral=True,
+        )
         return
 
-    await channel.send(embed=await make_embed(feed[-1], "feed"))
+    await channel.send(embed=await make_embed(item, "feed"))
     await interaction.followup.send(
         f"✅ Latest Instagram item sent to {channel.mention}.",
         ephemeral=True,
     )
+
+
+@ig.command(name="latest_reel", description="Post the newest Instagram Reel now.")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def latest_reel(interaction: discord.Interaction):
+    if not interaction.guild_id:
+        return
+
+    config = get_config(interaction.guild_id)
+    if not config:
+        await interaction.response.send_message(
+            "Run `/instagram setup` first.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    try:
+        feed = await asyncio.to_thread(fetch_feed)
+        reels = [item for item in feed if is_reel(item)]
+        item = newest_item(reels)
+    except Exception as exc:
+        await interaction.followup.send(
+            f"Instagram request failed: `{str(exc)[:600]}`",
+            ephemeral=True,
+        )
+        return
+
+    if not item:
+        await interaction.followup.send(
+            "Instagram did not return a Reel in the recent media list.",
+            ephemeral=True,
+        )
+        return
+
+    channel = await resolve_channel(
+        interaction.guild_id,
+        int(config["channel_id"]),
+    )
+    if not channel:
+        await interaction.followup.send(
+            "Configured channel is unavailable.",
+            ephemeral=True,
+        )
+        return
+
+    await channel.send(embed=await make_embed(item, "feed"))
+    await interaction.followup.send(
+        f"✅ Latest Reel sent to {channel.mention}.",
+        ephemeral=True,
+    )
+
+
+@ig.command(
+    name="sync",
+    description="Immediately post any Instagram items the bot has not posted yet.",
+)
+@app_commands.checks.has_permissions(manage_guild=True)
+async def sync(interaction: discord.Interaction):
+    if not interaction.guild_id:
+        return
+
+    config = get_config(interaction.guild_id)
+    if not config:
+        await interaction.response.send_message(
+            "Run `/instagram setup` first.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    try:
+        sent = await sync_unseen(config)
+    except Exception as exc:
+        await interaction.followup.send(
+            f"Instagram sync failed: "
+            f"`{type(exc).__name__}: {str(exc)[:540]}`",
+            ephemeral=True,
+        )
+        return
+
+    if sent:
+        await interaction.followup.send(
+            f"✅ Sync complete. Posted **{sent}** unseen Instagram item"
+            f"{'s' if sent != 1 else ''}.",
+            ephemeral=True,
+        )
+    else:
+        await interaction.followup.send(
+            "✅ Sync complete. No unseen Instagram items were returned by the API.",
+            ephemeral=True,
+        )
 
 
 @ig.command(name="disconnect", description="Stop Instagram auto-posting.")
@@ -595,6 +812,7 @@ async def latest(interaction: discord.Interaction):
 async def disconnect(interaction: discord.Interaction):
     if interaction.guild_id:
         remove_config(interaction.guild_id)
+
     await interaction.response.send_message(
         "✅ Instagram auto-posting disconnected.",
         ephemeral=True,
@@ -620,6 +838,8 @@ setup.error(command_error)
 status.error(command_error)
 test.error(command_error)
 latest.error(command_error)
+latest_reel.error(command_error)
+sync.error(command_error)
 disconnect.error(command_error)
 
 
@@ -631,26 +851,78 @@ async def on_ready():
 async def setup_hook():
     bot.tree.add_command(ig)
     await bot.tree.sync()
+
     if not poll_instagram.is_running():
         poll_instagram.start()
+
     log.info("Instagram slash commands synced")
 
 
 bot.setup_hook = setup_hook
 
 
+# ---------------------------------------------------------------------------
+# Hosted dashboard
+# ---------------------------------------------------------------------------
+
 web = Flask(__name__)
+
 PAGE = """
-<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Instagram → Discord</title>
-<style>body{font-family:Arial,sans-serif;background:#0e1015;color:#f5f7fb;margin:0}.wrap{max-width:760px;margin:70px auto;padding:24px}.card{background:#171a21;border:1px solid #292e39;border-radius:20px;padding:28px;margin-bottom:18px}h1{font-size:36px;margin:0 0 10px}p{line-height:1.6;color:#b8c0ce}.btn{display:inline-block;background:#5865f2;color:white;text-decoration:none;padding:14px 20px;border-radius:12px;font-weight:700}.ok{color:#69db7c}code{background:#0d0f14;padding:5px 8px;border-radius:7px}</style></head>
-<body><div class="wrap"><div class="card"><h1>Instagram → Discord</h1><p class="ok">● Hosted service is running</p><p>Automatically send every newly detected Instagram post, Reel, carousel/video and optional Story to Discord, with a clickable link back to Instagram.</p>{% if install_url %}<a class="btn" href="{{ install_url }}">Add to Discord</a>{% endif %}</div><div class="card"><h2>After installing</h2><p>Run <code>/instagram setup</code> in the Discord channel you want to use.</p></div></div></body></html>
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Instagram → Discord</title>
+<style>
+body{font-family:Arial,sans-serif;background:#0e1015;color:#f5f7fb;margin:0}
+.wrap{max-width:760px;margin:70px auto;padding:24px}
+.card{background:#171a21;border:1px solid #292e39;border-radius:20px;padding:28px;margin-bottom:18px}
+h1{font-size:36px;margin:0 0 10px}
+p{line-height:1.6;color:#b8c0ce}
+.btn{display:inline-block;background:#5865f2;color:white;text-decoration:none;padding:14px 20px;border-radius:12px;font-weight:700}
+.ok{color:#69db7c}
+code{background:#0d0f14;padding:5px 8px;border-radius:7px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="card">
+    <h1>Instagram → Discord</h1>
+    <p class="ok">● Hosted service is running</p>
+    <p>
+      Automatically send every newly detected Instagram post, Reel,
+      carousel/video and optional Story to Discord, with a clickable link
+      back to Instagram.
+    </p>
+    {% if install_url %}
+      <a class="btn" href="{{ install_url }}">Add to Discord</a>
+    {% endif %}
+  </div>
+  <div class="card">
+    <h2>Commands</h2>
+    <p>
+      <code>/instagram setup</code> ·
+      <code>/instagram latest</code> ·
+      <code>/instagram latest_reel</code> ·
+      <code>/instagram sync</code> ·
+      <code>/instagram status</code> ·
+      <code>/instagram test</code>
+    </p>
+  </div>
+</div>
+</body>
+</html>
 """
 
 
 def install_url():
     if not DISCORD_CLIENT_ID:
         return None
+
+    # View Channel + Send Messages + Embed Links + Read Message History
     permissions = 1024 + 2048 + 16384 + 65536
+
     return "https://discord.com/oauth2/authorize?" + urlencode(
         {
             "client_id": DISCORD_CLIENT_ID,
@@ -675,7 +947,12 @@ def health():
 
 
 def run_web():
-    web.run(host="0.0.0.0", port=PORT, use_reloader=False, threaded=True)
+    web.run(
+        host="0.0.0.0",
+        port=PORT,
+        use_reloader=False,
+        threaded=True,
+    )
 
 
 def validate():
@@ -689,8 +966,12 @@ def validate():
         }.items()
         if not value
     ]
+
     if missing:
-        raise RuntimeError("Missing required environment variables: " + ", ".join(missing))
+        raise RuntimeError(
+            "Missing required environment variables: "
+            + ", ".join(missing)
+        )
 
 
 if __name__ == "__main__":
